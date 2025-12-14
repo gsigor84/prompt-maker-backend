@@ -12,7 +12,7 @@ class PipelineMode(str, Enum):
 
 
 class SelectionPolicy(str, Enum):
-    # In backend/API we will NOT ask the user anything.
+    # Backend/API will NOT ask the user anything.
     # "first" means we always pick option 0.
     first = "first"
 
@@ -22,14 +22,16 @@ class PipelineConfig:
     mode: PipelineMode = PipelineMode.prod
     selection_policy: SelectionPolicy = SelectionPolicy.first
     json_strict: bool = True
+    # Use env var OPENAI_MODEL in production; this is just a fallback.
     model: str = "gpt-5"
 
     @classmethod
     def from_env(cls) -> "PipelineConfig":
         mode = os.getenv("PIPELINE_MODE", "prod").strip().lower()
-        json_strict = os.getenv("JSON_STRICT", "1").strip() not in {"0", "false", "no"}
+        json_strict = os.getenv("JSON_STRICT", "1").strip().lower() not in {"0", "false", "no"}
 
-        model = os.getenv("OPENAI_MODEL", "gpt-5").strip()
+        model = os.getenv("OPENAI_MODEL", cls.model).strip()
+
         try:
             parsed_mode = PipelineMode(mode)
         except Exception:
