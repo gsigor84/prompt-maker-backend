@@ -4,11 +4,13 @@ from __future__ import annotations
 import os
 import json
 import uuid
+import time
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from dotenv import load_dotenv
 from openai import OpenAI
+from openai import APITimeoutError, APIConnectionError, RateLimitError, APIError
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,9 +53,6 @@ class StepLoggerAdapter(logging.LoggerAdapter):
 class PromptRequest(BaseModel):
     task: str = Field(..., min_length=1)
 
-class PromptResponse(BaseModel):
-    prompt: str
-
 class DraftPrompt(BaseModel):
     persona: str = Field(..., min_length=1)
     context: str = Field(..., min_length=1)
@@ -74,26 +73,90 @@ def ensure_text(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, indent=2)
     return str(value).strip()
 
-def call_json(client: OpenAI, model: str, system_prompt: str, user_input: str, retries: int = 2) -> dict:
+def extract_json(raw: str) -> dict:
+    """
+    Best-effort JSON extraction:
+    - If raw is valid JSON -> return it
+    - Else try to extract the first {...} block
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        raise ValueError("Empty output")
+
+    # Direct parse
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+
+    # Extract first JSON object block
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = raw[start : end + 1].strip()
+        return json.loads(candidate)
+
+    raise ValueError("No JSON object found")
+
+def call_json(
+    client: OpenAI,
+    model: str,
+    system_prompt: str,
+    user_input: str,
+    *,
+    attempts: int = 3,
+    request_timeout: float = 70.0,
+) -> dict:
+    """
+    Render free tier can be slow or spin down, so we:
+    - set an explicit request timeout
+    - retry on transient errors
+    - retry on invalid JSON
+    """
     last_raw = ""
-    for _ in range(retries):
-        resp = client.responses.create(
-            model=model,
-            instructions=system_prompt,
-            input=user_input,
-        )
-        raw = (resp.output_text or "").strip()
-        last_raw = raw
-        if not raw:
-            continue
+    prompt = system_prompt
+
+    for i in range(1, attempts + 1):
         try:
-            return json.loads(raw)
-        except Exception:
-            system_prompt += (
-                "\n\nIMPORTANT: Your last output was invalid JSON. "
-                "Return ONLY valid JSON. No prose, no code fences."
+            resp = client.responses.create(
+                model=model,
+                instructions=prompt,
+                input=user_input,
+                timeout=request_timeout,   # IMPORTANT: per-request timeout
             )
-    raise RuntimeError(f"Invalid JSON from LLM. Raw output:\n{last_raw}")
+            raw = (resp.output_text or "").strip()
+            last_raw = raw
+
+            data = extract_json(raw)
+
+            # Validate keys exist (so DraftPrompt doesn't explode with weird shape)
+            for k in ["persona", "context", "task", "output_requirements", "permission_to_fail"]:
+                data[k] = ensure_text(data.get(k))
+
+            return data
+
+        except (APITimeoutError, APIConnectionError, RateLimitError, APIError) as e:
+            # Backoff on API/network transient issues
+            wait = min(2 ** (i - 1), 8)
+            time.sleep(wait)
+            if i == attempts:
+                raise RuntimeError(f"OpenAI request failed after retries: {type(e).__name__}: {e}") from e
+
+        except (json.JSONDecodeError, ValueError) as e:
+            # If model returned non-JSON, harden the instruction + retry once/twice
+            prompt = (
+                system_prompt
+                + "\n\nIMPORTANT:\n"
+                  "- Return ONLY a JSON object.\n"
+                  "- No extra text.\n"
+                  "- No markdown.\n"
+                  "- Must include keys: persona, context, task, output_requirements, permission_to_fail.\n"
+                  "- All values must be strings.\n"
+            )
+            if i == attempts:
+                raise RuntimeError(f"Invalid JSON from LLM after retries. Last output:\n{last_raw}") from e
+
+    raise RuntimeError(f"Failed to get valid JSON. Last output:\n{last_raw}")
 
 def format_final(d: DraftPrompt) -> str:
     return (
@@ -146,11 +209,9 @@ def make_prompt(req: PromptRequest):
     if not api_key:
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY is missing on the server.")
 
-    # BIGGER timeout so Render free doesn’t die mid-call
-    # This is the core fix for your ReadTimeout.
-    client = OpenAI(api_key=api_key, timeout=90.0)
+    client = OpenAI(api_key=api_key)
 
-    model = (_config.model or "gpt-5").strip()
+    model = (_config.model or "gpt-4o-mini").strip()
 
     log.info("START", extra={"step": "PROMPT"})
 
@@ -167,21 +228,19 @@ def make_prompt(req: PromptRequest):
     user_input = f"Build a high-quality prompt for this user task:\n{req.task}"
 
     try:
-        data = call_json(client, model, system_prompt, user_input, retries=2)
-
-        # normalize
-        data["persona"] = ensure_text(data.get("persona"))
-        data["context"] = ensure_text(data.get("context"))
-        data["task"] = ensure_text(data.get("task"))
-        data["output_requirements"] = ensure_text(data.get("output_requirements"))
-        data["permission_to_fail"] = ensure_text(data.get("permission_to_fail"))
+        data = call_json(
+            client,
+            model,
+            system_prompt,
+            user_input,
+            attempts=3,
+            request_timeout=70.0,
+        )
 
         draft = DraftPrompt(**data)
         final_prompt = format_final(draft)
 
-        # log/store
         _store.save({"run_id": run_id, "step": "DONE", "task": req.task})
-
         log.info("OK", extra={"step": "PROMPT"})
 
         return JSONResponse(content={"prompt": final_prompt})
