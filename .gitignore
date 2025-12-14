@@ -5,3 +5,9 @@ __pycache__/
 .idea/
 runs.jsonl
 data/runs.jsonl
+
+.env
+.venv/
+__pycache__/
+.idea/
+*.pyc
