@@ -5,8 +5,7 @@ import os
 import json
 import uuid
 import logging
-from enum import Enum
-from typing import List, Optional, Any, Dict
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -18,7 +17,7 @@ from fastapi.responses import JSONResponse
 from config import PipelineConfig
 from run_store import RunStore
 
-# Load .env locally (Render uses real env vars)
+# Load .env locally (Render uses env vars)
 load_dotenv()
 
 # -------------------------
@@ -37,9 +36,6 @@ logging.basicConfig(
     level=logging.INFO,
     format="[RUN %(run_id)s] STEP=%(step)s → %(message)s"
 )
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("openai").setLevel(logging.WARNING)
-
 root_logger = logging.getLogger()
 for h in root_logger.handlers:
     h.addFilter(ContextFilter())
@@ -52,27 +48,11 @@ class StepLoggerAdapter(logging.LoggerAdapter):
 # Models
 # -------------------------
 
-class AgentStep(str, Enum):
-    COLLECT_REQUIREMENTS = "collect_requirements"
-    ANALYZE_REQUIREMENTS = "analyze_requirements"
-    PROPOSE_DIRECTIONS = "propose_directions"
-    GENERATE_DRAFT = "generate_draft"
-    REFINE_OUTPUT = "refine_output"
-    FORMAT_FINAL_OUTPUT = "format_final_output"
-
-class Requirements(BaseModel):
+class PromptRequest(BaseModel):
     task: str = Field(..., min_length=1)
 
-class RequirementsAnalysis(BaseModel):
-    missing_info: List[str] = Field(default_factory=list)
-    assumptions: List[str] = Field(default_factory=list)
-
-class DirectionOption(BaseModel):
-    name: str = Field(..., min_length=1)
-    rationale: str = Field(..., min_length=1)
-
-class DirectionsProposal(BaseModel):
-    options: List[DirectionOption] = Field(..., min_length=1)
+class PromptResponse(BaseModel):
+    prompt: str
 
 class DraftPrompt(BaseModel):
     persona: str = Field(..., min_length=1)
@@ -81,283 +61,48 @@ class DraftPrompt(BaseModel):
     output_requirements: str = Field(..., min_length=1)
     permission_to_fail: str = Field(..., min_length=1)
 
-class RefinementReport(BaseModel):
-    changes: List[str] = Field(default_factory=list)
-    refined: DraftPrompt
-
-class FinalPrompt(BaseModel):
-    prompt: str = Field(..., min_length=1)
-
-class RunState(BaseModel):
-    run_id: str = Field(..., min_length=1)
-    step: AgentStep
-    requirements: Optional[Requirements] = None
-    analysis: Optional[RequirementsAnalysis] = None
-    directions: Optional[DirectionsProposal] = None
-    draft: Optional[DraftPrompt] = None
-    refinement: Optional[RefinementReport] = None
-    final: Optional[FinalPrompt] = None
-
-class PromptRequest(BaseModel):
-    task: str = Field(..., min_length=1)
-
 # -------------------------
-# LLM client
+# Helpers
 # -------------------------
 
-class LLMClient:
-    def __init__(self, api_key: str, model: str, timeout_s: float = 25.0):
-        # Important on Render: enforce timeouts so the proxy doesn’t kill the connection
-        self.client = OpenAI(api_key=api_key, timeout=timeout_s)
-        self.model = model
+def ensure_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    return str(value).strip()
 
-    def call(self, system_prompt: str, user_input: str) -> str:
-        response = self.client.responses.create(
-            model=self.model,
+def call_json(client: OpenAI, model: str, system_prompt: str, user_input: str, retries: int = 2) -> dict:
+    last_raw = ""
+    for _ in range(retries):
+        resp = client.responses.create(
+            model=model,
             instructions=system_prompt,
             input=user_input,
         )
-        return response.output_text or ""
+        raw = (resp.output_text or "").strip()
+        last_raw = raw
+        if not raw:
+            continue
+        try:
+            return json.loads(raw)
+        except Exception:
+            system_prompt += (
+                "\n\nIMPORTANT: Your last output was invalid JSON. "
+                "Return ONLY valid JSON. No prose, no code fences."
+            )
+    raise RuntimeError(f"Invalid JSON from LLM. Raw output:\n{last_raw}")
 
-# -------------------------
-# Orchestrator
-# -------------------------
-
-class PromptForgeOrchestrator:
-    def __init__(self, llm: LLMClient, store: RunStore, config: PipelineConfig):
-        self.llm = llm
-        self.store = store
-        self.config = config
-        self.run_id = str(uuid.uuid4())[:8]
-        self.current_task = ""
-        self.log = StepLoggerAdapter(
-            logging.getLogger(__name__),
-            {"run_id": self.run_id, "step": "INIT"}
-        )
-
-    def _save_state(self, state: RunState) -> None:
-        self.store.save(state.model_dump())
-
-    def _ensure_text(self, value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value.strip()
-        if isinstance(value, (dict, list)):
-            return json.dumps(value, ensure_ascii=False, indent=2)
-        return str(value).strip()
-
-    def _call_json(self, system_prompt: str, user_input: str) -> dict:
-        last_raw = ""
-        retries = 2 if self.config.json_strict else 1
-
-        for _ in range(retries):
-            raw = self.llm.call(system_prompt=system_prompt, user_input=user_input)
-            last_raw = raw.strip()
-
-            # If OpenAI returns empty text for any reason, retry once (common in edge cases)
-            if not last_raw:
-                continue
-
-            try:
-                return json.loads(last_raw)
-            except Exception:
-                system_prompt = (
-                    system_prompt
-                    + "\n\nIMPORTANT: Your last output was invalid JSON. "
-                      "Return ONLY valid JSON. No prose, no code fences."
-                )
-
-        raise RuntimeError(f"Invalid JSON from LLM. Raw output:\n{last_raw}")
-
-    def _select_direction(self, directions: DirectionsProposal) -> DirectionOption:
-        return directions.options[0]
-
-    def collect_requirements(self, user_task: str) -> Requirements:
-        self.log.info("START", extra={"step": "COLLECT_REQUIREMENTS"})
-        out = Requirements(task=user_task)
-        self.log.info("OK", extra={"step": "COLLECT_REQUIREMENTS"})
-        return out
-
-    def analyze_requirements(self, req: Requirements) -> RequirementsAnalysis:
-        self.log.info("START", extra={"step": "ANALYZE_REQUIREMENTS"})
-
-        system_prompt = (
-            "You are a requirements-analysis agent for prompt engineering.\n"
-            "You MUST NOT invent user requirements.\n"
-            "Identify missing info to build a high-quality prompt + minimal assumptions.\n\n"
-            "Return ONLY valid JSON with keys:\n"
-            "missing_info (array of strings), assumptions (array of strings).\n"
-            "No extra text."
-        )
-
-        user_input = (
-            f"User task:\n{req.task}\n\n"
-            "Analyze what is missing to create a strong, reusable AI prompt. "
-            "Missing info should be concrete (audience, tone, platform, output format). "
-            "Assumptions should be explicit and minimal."
-        )
-
-        data = self._call_json(system_prompt, user_input)
-
-        if not isinstance(data.get("missing_info"), list):
-            data["missing_info"] = [str(data.get("missing_info"))] if data.get("missing_info") else []
-        if not isinstance(data.get("assumptions"), list):
-            data["assumptions"] = [str(data.get("assumptions"))] if data.get("assumptions") else []
-
-        out = RequirementsAnalysis(**data)
-        self.log.info("OK", extra={"step": "ANALYZE_REQUIREMENTS"})
-        return out
-
-    def propose_directions(self, analysis: RequirementsAnalysis) -> DirectionsProposal:
-        self.log.info("START", extra={"step": "PROPOSE_DIRECTIONS"})
-
-        system_prompt = (
-            "You are a prompt-strategy orchestrator.\n"
-            "Given missing info + assumptions, propose 3 distinct prompt-building directions.\n"
-            "Each option must be practical and must NOT invent user requirements.\n\n"
-            "Return ONLY valid JSON with this shape:\n"
-            "{ \"options\": [ {\"name\": \"...\", \"rationale\": \"...\"}, ... ] }\n"
-            "No extra text."
-        )
-
-        user_input = json.dumps(
-            {
-                "missing_info": analysis.missing_info,
-                "assumptions": analysis.assumptions,
-                "rule": "Do not add requirements. Only propose strategies for how to write the prompt."
-            },
-            ensure_ascii=False
-        )
-
-        data = self._call_json(system_prompt, user_input)
-        opts = data.get("options", [])
-        if not isinstance(opts, list):
-            opts = []
-
-        out = DirectionsProposal(**{"options": opts})
-        self.log.info("OK", extra={"step": "PROPOSE_DIRECTIONS"})
-        return out
-
-    def generate_draft(self, req: Requirements, chosen: DirectionOption) -> DraftPrompt:
-        self.log.info("START", extra={"step": "GENERATE_DRAFT"})
-
-        system_prompt = (
-            "You are a prompt-design agent. You NEVER execute the user's task. "
-            "You only produce a prompt template.\n\n"
-            "Rules:\n"
-            "- Do NOT invent user requirements.\n"
-            "- Always include: persona, context, task, output_requirements, permission_to_fail.\n"
-            "- Return ONLY JSON with those keys.\n"
-            "- IMPORTANT: values must be STRINGS.\n"
-            "No extra text."
-        )
-
-        data = self._call_json(system_prompt, f"Build a prompt for: {req.task}")
-
-        data["persona"] = self._ensure_text(data.get("persona"))
-        data["context"] = self._ensure_text(data.get("context"))
-        data["task"] = self._ensure_text(data.get("task"))
-        data["output_requirements"] = self._ensure_text(data.get("output_requirements"))
-        data["permission_to_fail"] = self._ensure_text(data.get("permission_to_fail"))
-
-        out = DraftPrompt(**data)
-        self.log.info("OK", extra={"step": "GENERATE_DRAFT"})
-        return out
-
-    def refine_output(self, draft: DraftPrompt, chosen: DirectionOption) -> RefinementReport:
-        self.log.info("START", extra={"step": "REFINE_OUTPUT"})
-
-        system_prompt = (
-            "You are a prompt-quality refiner. You NEVER execute the user's task. "
-            "You only improve the prompt.\n\n"
-            "Return ONLY JSON with keys:\n"
-            "changes (array of strings), refined (object with keys: "
-            "persona, context, task, output_requirements, permission_to_fail).\n"
-            "- IMPORTANT: refined values must be STRINGS.\n"
-            "No extra text."
-        )
-
-        user_input = json.dumps(draft.model_dump(), ensure_ascii=False)
-        data = self._call_json(system_prompt, user_input)
-
-        refined = data.get("refined", {}) or {}
-        refined["persona"] = self._ensure_text(refined.get("persona"))
-        refined["context"] = self._ensure_text(refined.get("context"))
-        refined["task"] = self._ensure_text(refined.get("task"))
-        refined["output_requirements"] = self._ensure_text(refined.get("output_requirements"))
-        refined["permission_to_fail"] = self._ensure_text(refined.get("permission_to_fail"))
-        data["refined"] = refined
-
-        out = RefinementReport(**data)
-        self.log.info("OK", extra={"step": "REFINE_OUTPUT"})
-        return out
-
-    def format_final_output(self, refined: DraftPrompt) -> FinalPrompt:
-        self.log.info("START", extra={"step": "FORMAT_FINAL_OUTPUT"})
-
-        prompt = (
-            f"ROLE / PERSONA:\n{refined.persona}\n\n"
-            f"CONTEXT:\n{refined.context}\n\n"
-            f"TASK:\n{refined.task}\n\n"
-            f"OUTPUT REQUIREMENTS:\n{refined.output_requirements}\n\n"
-            f"PERMISSION TO FAIL:\n{refined.permission_to_fail}"
-        )
-
-        out = FinalPrompt(prompt=prompt)
-        self.log.info("OK", extra={"step": "FORMAT_FINAL_OUTPUT"})
-        return out
-
-    def run(self, user_task: str) -> FinalPrompt:
-        self.current_task = user_task
-        self.log.info("START", extra={"step": "RUN"})
-
-        state = RunState(run_id=self.run_id, step=AgentStep.COLLECT_REQUIREMENTS)
-        self._save_state(state)
-
-        req = self.collect_requirements(user_task)
-        state.step = AgentStep.COLLECT_REQUIREMENTS
-        state.requirements = req
-        self._save_state(state)
-
-        analysis = self.analyze_requirements(req)
-        state.step = AgentStep.ANALYZE_REQUIREMENTS
-        state.analysis = analysis
-        self._save_state(state)
-
-        directions = self.propose_directions(analysis)
-        state.step = AgentStep.PROPOSE_DIRECTIONS
-        state.directions = directions
-        self._save_state(state)
-
-        chosen = self._select_direction(directions)
-
-        self.store.save({
-            "run_id": self.run_id,
-            "task": self.current_task,
-            "chosen_direction_name": chosen.name,
-            "step": "CHOSEN_DIRECTION",
-        })
-
-        self.log.info(f"CHOSEN: {chosen.name}", extra={"step": "PROPOSE_DIRECTIONS"})
-
-        draft = self.generate_draft(req, chosen)
-        state.step = AgentStep.GENERATE_DRAFT
-        state.draft = draft
-        self._save_state(state)
-
-        refinement = self.refine_output(draft, chosen)
-        state.step = AgentStep.REFINE_OUTPUT
-        state.refinement = refinement
-        self._save_state(state)
-
-        final = self.format_final_output(refinement.refined)
-        state.step = AgentStep.FORMAT_FINAL_OUTPUT
-        state.final = final
-        self._save_state(state)
-
-        self.log.info("OK", extra={"step": "RUN"})
-        return final
+def format_final(d: DraftPrompt) -> str:
+    return (
+        f"ROLE / PERSONA:\n{d.persona}\n\n"
+        f"CONTEXT:\n{d.context}\n\n"
+        f"TASK:\n{d.task}\n\n"
+        f"OUTPUT REQUIREMENTS:\n{d.output_requirements}\n\n"
+        f"PERMISSION TO FAIL:\n{d.permission_to_fail}"
+    )
 
 # -------------------------
 # FastAPI app
@@ -388,28 +133,59 @@ _store = RunStore()
 def health() -> Dict[str, str]:
     return {"status": "ok"}
 
-# quick POST sanity check on Render
 @app.post("/api/ping")
 def ping() -> Dict[str, str]:
     return {"ok": "pong"}
 
 @app.post("/api/prompt")
 def make_prompt(req: PromptRequest):
+    run_id = str(uuid.uuid4())[:8]
+    log = StepLoggerAdapter(logging.getLogger(__name__), {"run_id": run_id, "step": "API"})
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is missing on the server.")
+
+    # BIGGER timeout so Render free doesn’t die mid-call
+    # This is the core fix for your ReadTimeout.
+    client = OpenAI(api_key=api_key, timeout=90.0)
+
+    model = (_config.model or "gpt-5").strip()
+
+    log.info("START", extra={"step": "PROMPT"})
+
+    system_prompt = (
+        "You are a prompt-design agent.\n"
+        "You NEVER execute the user's task.\n"
+        "You ONLY output a reusable prompt.\n\n"
+        "Return ONLY valid JSON with EXACT keys:\n"
+        "persona, context, task, output_requirements, permission_to_fail\n"
+        "All values MUST be strings.\n"
+        "No extra text."
+    )
+
+    user_input = f"Build a high-quality prompt for this user task:\n{req.task}"
+
     try:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise HTTPException(status_code=500, detail="OPENAI_API_KEY is missing on the server.")
+        data = call_json(client, model, system_prompt, user_input, retries=2)
 
-        llm = LLMClient(api_key=api_key, model=_config.model, timeout_s=25.0)
-        orchestrator = PromptForgeOrchestrator(llm, _store, _config)
+        # normalize
+        data["persona"] = ensure_text(data.get("persona"))
+        data["context"] = ensure_text(data.get("context"))
+        data["task"] = ensure_text(data.get("task"))
+        data["output_requirements"] = ensure_text(data.get("output_requirements"))
+        data["permission_to_fail"] = ensure_text(data.get("permission_to_fail"))
 
-        final = orchestrator.run(req.task)
+        draft = DraftPrompt(**data)
+        final_prompt = format_final(draft)
 
-        # IMPORTANT: return explicitly as JSONResponse (avoids “empty reply” edge cases)
-        return JSONResponse(content={"prompt": final.prompt})
+        # log/store
+        _store.save({"run_id": run_id, "step": "DONE", "task": req.task})
 
-    except HTTPException:
-        raise
+        log.info("OK", extra={"step": "PROMPT"})
+
+        return JSONResponse(content={"prompt": final_prompt})
+
     except Exception as e:
-        logging.getLogger(__name__).exception("ERROR in /api/prompt")
+        log.exception("ERROR", extra={"step": "PROMPT"})
         raise HTTPException(status_code=500, detail=str(e))
