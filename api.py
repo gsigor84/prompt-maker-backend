@@ -34,6 +34,7 @@ class ContextFilter(logging.Filter):
             record.step = "-"
         return True
 
+
 logging.basicConfig(
     level=logging.INFO,
     format="[RUN %(run_id)s] STEP=%(step)s → %(message)s"
@@ -42,9 +43,11 @@ root_logger = logging.getLogger()
 for h in root_logger.handlers:
     h.addFilter(ContextFilter())
 
+
 class StepLoggerAdapter(logging.LoggerAdapter):
     def process(self, msg, kwargs):
         return msg, {"extra": {**self.extra, **kwargs.get("extra", {})}}
+
 
 # -------------------------
 # Models
@@ -53,12 +56,14 @@ class StepLoggerAdapter(logging.LoggerAdapter):
 class PromptRequest(BaseModel):
     task: str = Field(..., min_length=1)
 
+
 class DraftPrompt(BaseModel):
     persona: str = Field(..., min_length=1)
     context: str = Field(..., min_length=1)
     task: str = Field(..., min_length=1)
     output_requirements: str = Field(..., min_length=1)
     permission_to_fail: str = Field(..., min_length=1)
+
 
 # -------------------------
 # Helpers
@@ -72,6 +77,7 @@ def ensure_text(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, indent=2)
     return str(value).strip()
+
 
 def extract_json(raw: str) -> dict:
     """
@@ -93,10 +99,11 @@ def extract_json(raw: str) -> dict:
     start = raw.find("{")
     end = raw.rfind("}")
     if start != -1 and end != -1 and end > start:
-        candidate = raw[start : end + 1].strip()
+        candidate = raw[start:end + 1].strip()
         return json.loads(candidate)
 
     raise ValueError("No JSON object found")
+
 
 def call_json(
     client: OpenAI,
@@ -105,12 +112,10 @@ def call_json(
     user_input: str,
     *,
     attempts: int = 3,
-    request_timeout: float = 70.0,
 ) -> dict:
     """
-    Render free tier can be slow or spin down, so we:
-    - set an explicit request timeout
-    - retry on transient errors
+    Render free tier can be slow/spin down, so:
+    - retry on transient OpenAI/http issues
     - retry on invalid JSON
     """
     last_raw = ""
@@ -122,14 +127,14 @@ def call_json(
                 model=model,
                 instructions=prompt,
                 input=user_input,
-                timeout=request_timeout,   # IMPORTANT: per-request timeout
             )
+
             raw = (resp.output_text or "").strip()
             last_raw = raw
 
             data = extract_json(raw)
 
-            # Validate keys exist (so DraftPrompt doesn't explode with weird shape)
+            # Normalize required keys so DraftPrompt doesn't crash
             for k in ["persona", "context", "task", "output_requirements", "permission_to_fail"]:
                 data[k] = ensure_text(data.get(k))
 
@@ -143,7 +148,7 @@ def call_json(
                 raise RuntimeError(f"OpenAI request failed after retries: {type(e).__name__}: {e}") from e
 
         except (json.JSONDecodeError, ValueError) as e:
-            # If model returned non-JSON, harden the instruction + retry once/twice
+            # Harden the instruction and retry
             prompt = (
                 system_prompt
                 + "\n\nIMPORTANT:\n"
@@ -154,9 +159,14 @@ def call_json(
                   "- All values must be strings.\n"
             )
             if i == attempts:
-                raise RuntimeError(f"Invalid JSON from LLM after retries. Last output:\n{last_raw}") from e
+                snippet = (last_raw[:800] + "…") if len(last_raw) > 800 else last_raw
+                raise RuntimeError(
+                    "Invalid JSON from LLM after retries. Last output snippet:\n"
+                    + snippet
+                ) from e
 
-    raise RuntimeError(f"Failed to get valid JSON. Last output:\n{last_raw}")
+    raise RuntimeError("Failed to get valid JSON (unexpected).")
+
 
 def format_final(d: DraftPrompt) -> str:
     return (
@@ -166,6 +176,7 @@ def format_final(d: DraftPrompt) -> str:
         f"OUTPUT REQUIREMENTS:\n{d.output_requirements}\n\n"
         f"PERMISSION TO FAIL:\n{d.permission_to_fail}"
     )
+
 
 # -------------------------
 # FastAPI app
@@ -192,13 +203,16 @@ app.add_middleware(
 _config = PipelineConfig.from_env()
 _store = RunStore()
 
+
 @app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
 
+
 @app.post("/api/ping")
 def ping() -> Dict[str, str]:
     return {"ok": "pong"}
+
 
 @app.post("/api/prompt")
 def make_prompt(req: PromptRequest):
@@ -209,7 +223,8 @@ def make_prompt(req: PromptRequest):
     if not api_key:
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY is missing on the server.")
 
-    client = OpenAI(api_key=api_key)
+    # IMPORTANT: set client timeout here (more reliable than per-request timeout)
+    client = OpenAI(api_key=api_key, timeout=90.0)
 
     model = (_config.model or "gpt-4o-mini").strip()
 
@@ -229,20 +244,23 @@ def make_prompt(req: PromptRequest):
 
     try:
         data = call_json(
-            client,
-            model,
-            system_prompt,
-            user_input,
+            client=client,
+            model=model,
+            system_prompt=system_prompt,
+            user_input=user_input,
             attempts=3,
-            request_timeout=70.0,
         )
 
         draft = DraftPrompt(**data)
         final_prompt = format_final(draft)
 
-        _store.save({"run_id": run_id, "step": "DONE", "task": req.task})
-        log.info("OK", extra={"step": "PROMPT"})
+        # Store should never break the response
+        try:
+            _store.save({"run_id": run_id, "step": "DONE", "task": req.task})
+        except Exception:
+            log.exception("RunStore save failed", extra={"step": "STORE"})
 
+        log.info("OK", extra={"step": "PROMPT"})
         return JSONResponse(content={"prompt": final_prompt})
 
     except Exception as e:
