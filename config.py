@@ -23,7 +23,7 @@ class PipelineConfig:
     selection_policy: SelectionPolicy = SelectionPolicy.first
     json_strict: bool = True
     # Use env var OPENAI_MODEL in production; this is just a fallback.
-    model: str = "gpt-5"
+    model: str = "gpt-4o-mini"
 
     @classmethod
     def from_env(cls) -> "PipelineConfig":
