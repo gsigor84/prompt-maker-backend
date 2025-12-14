@@ -13,28 +13,25 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from config import PipelineConfig
 from run_store import RunStore
 
-
-# Load .env locally (servers like Render/Railway/Fly set real env vars)
+# Load .env locally (Render uses real env vars)
 load_dotenv()
 
-
 # -------------------------
-# Logging (console only)
+# Logging
 # -------------------------
 
 class ContextFilter(logging.Filter):
-    """Ensures every log record has run_id and step, so formatting never crashes."""
     def filter(self, record: logging.LogRecord) -> bool:
         if not hasattr(record, "run_id"):
             record.run_id = "-"
         if not hasattr(record, "step"):
             record.step = "-"
         return True
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,11 +44,9 @@ root_logger = logging.getLogger()
 for h in root_logger.handlers:
     h.addFilter(ContextFilter())
 
-
 class StepLoggerAdapter(logging.LoggerAdapter):
     def process(self, msg, kwargs):
         return msg, {"extra": {**self.extra, **kwargs.get("extra", {})}}
-
 
 # -------------------------
 # Models
@@ -65,24 +60,19 @@ class AgentStep(str, Enum):
     REFINE_OUTPUT = "refine_output"
     FORMAT_FINAL_OUTPUT = "format_final_output"
 
-
 class Requirements(BaseModel):
     task: str = Field(..., min_length=1)
-
 
 class RequirementsAnalysis(BaseModel):
     missing_info: List[str] = Field(default_factory=list)
     assumptions: List[str] = Field(default_factory=list)
 
-
 class DirectionOption(BaseModel):
     name: str = Field(..., min_length=1)
     rationale: str = Field(..., min_length=1)
 
-
 class DirectionsProposal(BaseModel):
     options: List[DirectionOption] = Field(..., min_length=1)
-
 
 class DraftPrompt(BaseModel):
     persona: str = Field(..., min_length=1)
@@ -91,15 +81,12 @@ class DraftPrompt(BaseModel):
     output_requirements: str = Field(..., min_length=1)
     permission_to_fail: str = Field(..., min_length=1)
 
-
 class RefinementReport(BaseModel):
     changes: List[str] = Field(default_factory=list)
     refined: DraftPrompt
 
-
 class FinalPrompt(BaseModel):
     prompt: str = Field(..., min_length=1)
-
 
 class RunState(BaseModel):
     run_id: str = Field(..., min_length=1)
@@ -111,26 +98,17 @@ class RunState(BaseModel):
     refinement: Optional[RefinementReport] = None
     final: Optional[FinalPrompt] = None
 
-
-# -------------------------
-# API request/response models
-# -------------------------
-
 class PromptRequest(BaseModel):
     task: str = Field(..., min_length=1)
-
-
-class PromptResponse(BaseModel):
-    prompt: str
-
 
 # -------------------------
 # LLM client
 # -------------------------
 
 class LLMClient:
-    def __init__(self, api_key: str, model: str):
-        self.client = OpenAI(api_key=api_key)
+    def __init__(self, api_key: str, model: str, timeout_s: float = 25.0):
+        # Important on Render: enforce timeouts so the proxy doesn’t kill the connection
+        self.client = OpenAI(api_key=api_key, timeout=timeout_s)
         self.model = model
 
     def call(self, system_prompt: str, user_input: str) -> str:
@@ -139,9 +117,7 @@ class LLMClient:
             instructions=system_prompt,
             input=user_input,
         )
-        # Note: output_text can sometimes be "" (empty) depending on model behavior
         return response.output_text or ""
-
 
 # -------------------------
 # Orchestrator
@@ -162,42 +138,6 @@ class PromptForgeOrchestrator:
     def _save_state(self, state: RunState) -> None:
         self.store.save(state.model_dump())
 
-    # ✅ FIXED: hardened JSON parsing (handles empty output + markdown code fences + retries)
-    def _call_json(self, system_prompt: str, user_input: str) -> dict:
-        last_raw = ""
-        retries = 3 if self.config.json_strict else 1
-
-        for _attempt in range(retries):
-            raw = self.llm.call(system_prompt=system_prompt, user_input=user_input)
-            last_raw = raw
-
-            if not raw or not raw.strip():
-                self.log.warning("Empty LLM response, retrying...", extra={"step": "LLM_JSON"})
-                continue
-
-            cleaned = raw.strip()
-
-            # Strip ```json ... ``` fences if present
-            if cleaned.startswith("```"):
-                # Remove the triple backticks and optional "json" tag
-                cleaned = cleaned.strip("`").strip()
-                if cleaned.lower().startswith("json"):
-                    cleaned = cleaned[4:].strip()
-
-            try:
-                return json.loads(cleaned)
-            except json.JSONDecodeError:
-                self.log.warning("Invalid JSON from LLM, retrying...", extra={"step": "LLM_JSON"})
-                system_prompt += (
-                    "\n\nIMPORTANT:\n"
-                    "- Your previous response was INVALID JSON.\n"
-                    "- Return ONLY valid JSON.\n"
-                    "- No explanations.\n"
-                    "- No markdown.\n"
-                )
-
-        raise RuntimeError("LLM repeatedly returned invalid JSON. Last output:\n" + last_raw)
-
     def _ensure_text(self, value: Any) -> str:
         if value is None:
             return ""
@@ -206,6 +146,29 @@ class PromptForgeOrchestrator:
         if isinstance(value, (dict, list)):
             return json.dumps(value, ensure_ascii=False, indent=2)
         return str(value).strip()
+
+    def _call_json(self, system_prompt: str, user_input: str) -> dict:
+        last_raw = ""
+        retries = 2 if self.config.json_strict else 1
+
+        for _ in range(retries):
+            raw = self.llm.call(system_prompt=system_prompt, user_input=user_input)
+            last_raw = raw.strip()
+
+            # If OpenAI returns empty text for any reason, retry once (common in edge cases)
+            if not last_raw:
+                continue
+
+            try:
+                return json.loads(last_raw)
+            except Exception:
+                system_prompt = (
+                    system_prompt
+                    + "\n\nIMPORTANT: Your last output was invalid JSON. "
+                      "Return ONLY valid JSON. No prose, no code fences."
+                )
+
+        raise RuntimeError(f"Invalid JSON from LLM. Raw output:\n{last_raw}")
 
     def _select_direction(self, directions: DirectionsProposal) -> DirectionOption:
         return directions.options[0]
@@ -227,6 +190,7 @@ class PromptForgeOrchestrator:
             "missing_info (array of strings), assumptions (array of strings).\n"
             "No extra text."
         )
+
         user_input = (
             f"User task:\n{req.task}\n\n"
             "Analyze what is missing to create a strong, reusable AI prompt. "
@@ -234,7 +198,7 @@ class PromptForgeOrchestrator:
             "Assumptions should be explicit and minimal."
         )
 
-        data = self._call_json(system_prompt=system_prompt, user_input=user_input)
+        data = self._call_json(system_prompt, user_input)
 
         if not isinstance(data.get("missing_info"), list):
             data["missing_info"] = [str(data.get("missing_info"))] if data.get("missing_info") else []
@@ -266,7 +230,7 @@ class PromptForgeOrchestrator:
             ensure_ascii=False
         )
 
-        data = self._call_json(system_prompt=system_prompt, user_input=user_input)
+        data = self._call_json(system_prompt, user_input)
         opts = data.get("options", [])
         if not isinstance(opts, list):
             opts = []
@@ -281,15 +245,11 @@ class PromptForgeOrchestrator:
         system_prompt = (
             "You are a prompt-design agent. You NEVER execute the user's task. "
             "You only produce a prompt template.\n\n"
-            "You must follow the chosen direction:\n"
-            f"- Direction name: {chosen.name}\n"
-            f"- Rationale: {chosen.rationale}\n\n"
             "Rules:\n"
             "- Do NOT invent user requirements.\n"
-            "- Always include the foundations: persona, context, task, output_requirements, permission_to_fail.\n"
-            "- Return ONLY JSON object with keys:\n"
-            "persona, context, task, output_requirements, permission_to_fail\n"
-            "- IMPORTANT: values must be STRINGS (not objects, not arrays).\n"
+            "- Always include: persona, context, task, output_requirements, permission_to_fail.\n"
+            "- Return ONLY JSON with those keys.\n"
+            "- IMPORTANT: values must be STRINGS.\n"
             "No extra text."
         )
 
@@ -311,24 +271,17 @@ class PromptForgeOrchestrator:
         system_prompt = (
             "You are a prompt-quality refiner. You NEVER execute the user's task. "
             "You only improve the prompt.\n\n"
-            "You must preserve and strengthen the chosen direction:\n"
-            f"- Direction name: {chosen.name}\n"
-            f"- Rationale: {chosen.rationale}\n\n"
-            "Rules:\n"
-            "- Do NOT invent user requirements.\n"
-            "- Do NOT change the task intent.\n"
-            "- Keep foundations: persona, context, task, output_requirements, permission_to_fail.\n\n"
             "Return ONLY JSON with keys:\n"
             "changes (array of strings), refined (object with keys: "
             "persona, context, task, output_requirements, permission_to_fail).\n"
-            "- IMPORTANT: all refined values must be STRINGS.\n"
+            "- IMPORTANT: refined values must be STRINGS.\n"
             "No extra text."
         )
 
         user_input = json.dumps(draft.model_dump(), ensure_ascii=False)
-        data = self._call_json(system_prompt=system_prompt, user_input=user_input)
+        data = self._call_json(system_prompt, user_input)
 
-        refined = data.get("refined", {})
+        refined = data.get("refined", {}) or {}
         refined["persona"] = self._ensure_text(refined.get("persona"))
         refined["context"] = self._ensure_text(refined.get("context"))
         refined["task"] = self._ensure_text(refined.get("task"))
@@ -350,8 +303,8 @@ class PromptForgeOrchestrator:
             f"OUTPUT REQUIREMENTS:\n{refined.output_requirements}\n\n"
             f"PERMISSION TO FAIL:\n{refined.permission_to_fail}"
         )
-        out = FinalPrompt(prompt=prompt)
 
+        out = FinalPrompt(prompt=prompt)
         self.log.info("OK", extra={"step": "FORMAT_FINAL_OUTPUT"})
         return out
 
@@ -406,7 +359,6 @@ class PromptForgeOrchestrator:
         self.log.info("OK", extra={"step": "RUN"})
         return final
 
-
 # -------------------------
 # FastAPI app
 # -------------------------
@@ -432,28 +384,32 @@ app.add_middleware(
 _config = PipelineConfig.from_env()
 _store = RunStore()
 
-
 @app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
 
+# quick POST sanity check on Render
+@app.post("/api/ping")
+def ping() -> Dict[str, str]:
+    return {"ok": "pong"}
 
-@app.post("/api/prompt", response_model=PromptResponse)
-def make_prompt(req: PromptRequest) -> PromptResponse:
+@app.post("/api/prompt")
+def make_prompt(req: PromptRequest):
     try:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise HTTPException(status_code=500, detail="OPENAI_API_KEY is missing on the server.")
 
-        llm = LLMClient(api_key=api_key, model=_config.model)
-
+        llm = LLMClient(api_key=api_key, model=_config.model, timeout_s=25.0)
         orchestrator = PromptForgeOrchestrator(llm, _store, _config)
+
         final = orchestrator.run(req.task)
-        return PromptResponse(prompt=final.prompt)
+
+        # IMPORTANT: return explicitly as JSONResponse (avoids “empty reply” edge cases)
+        return JSONResponse(content={"prompt": final.prompt})
 
     except HTTPException:
         raise
-    except Exception:
+    except Exception as e:
         logging.getLogger(__name__).exception("ERROR in /api/prompt")
-        # Safer error message for prod (don’t leak internals)
-        raise HTTPException(status_code=500, detail="Prompt generation failed. Please retry.")
+        raise HTTPException(status_code=500, detail=str(e))
