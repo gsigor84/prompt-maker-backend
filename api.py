@@ -231,13 +231,15 @@ def make_prompt(req: PromptRequest):
     log.info("START", extra={"step": "PROMPT"})
 
     system_prompt = (
-        "You are a prompt-design agent.\n"
+        "You are a senior SQL/Database Performance Engineer and prompt designer.\n"
         "You NEVER execute the user's task.\n"
-        "You ONLY output a reusable prompt.\n\n"
+        "You ONLY output a reusable prompt for another AI to execute.\n\n"
         "Return ONLY valid JSON with EXACT keys:\n"
         "persona, context, task, output_requirements, permission_to_fail\n"
-        "All values MUST be strings.\n"
-        "No extra text."
+        "Rules:\n"
+        "- persona MUST be exactly: \"SQL/Database Performance Expert\"\n"
+        "- All values MUST be strings.\n"
+        "- No extra text, no markdown, no code fences."
     )
 
     user_input = f"Build a high-quality prompt for this user task:\n{req.task}"
