@@ -24,20 +24,8 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Prompt Maker Backend", version="1.0.0")
 
 # ------------------------------------------------------------------
-# ✅ CORS FIX (THIS IS THE IMPORTANT PART)
-# ------------------------------------------------------------------
+# CORS is now handled in main.py to cover all routers.
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
-    allow_origin_regex=r"^https://prompt-maker-.*\.vercel\.app$",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # ------------------------------------------------------------------
 # Models
@@ -52,7 +40,8 @@ class PromptRequest(BaseModel):
 
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
-    raise RuntimeError("OPENAI_API_KEY is missing")
+    logger.error("❌ OPENAI_API_KEY IS MISSING! The app will start but generation will fail.")
+
 
 client = OpenAI(api_key=api_key, timeout=90.0)
 
