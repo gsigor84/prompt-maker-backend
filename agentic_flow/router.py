@@ -71,10 +71,22 @@ async def run_pipeline(request: AgentRequest):
     effective_task = request.task
     if request.answers:
         formatted_answers = "\n".join([f"Q: {k}\nA: {v}" for k, v in request.answers.items()])
-        effective_task += f"\n\n[USER PROVIDED DETAILS]\n{formatted_answers}"
+        
+        # We wrap the user request in a "Final Generation Directive" 
+        # to stop the AI from asking meta-questions about the prompt itself.
+        directive = (
+            "--- FINAL GENERATION DIRECTIVE ---\n"
+            "The user has provided all necessary details. You MUST now proceed to "
+            "generate the FINAL, WORKING PROMPT for the task below.\n"
+            "Do NOT ask for more information. Do NOT focus on missing details.\n"
+            "Focus 100% on building a robust, high-quality prompt based on these details:\n\n"
+            f"Original Task: {request.task}\n\n"
+            f"[USER PROVIDED ANSWERS]\n{formatted_answers}\n"
+            "--- END DIRECTIVE ---"
+        )
+        effective_task = directive
         
     # 2. Run Normal Generation
-    # We pass answers explicitly, but effective_task has them baked in too.
     result = orchestrator.run(user_task=effective_task, answers=request.answers)
     
     # 3. Standard Response Mapping
