@@ -18,5 +18,5 @@ COPY . .
 # ---- Fly.io expects internal port 8080 ----
 ENV PORT=8080
 
-# ---- Start FastAPI ----
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+# ---- Start FastAPI via CLI ----
+CMD ["python", "main.py", "serve"]

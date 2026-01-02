@@ -23,6 +23,17 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Prompt Maker Backend", version="1.0.0")
 
+# ✅ NUCLEAR CORS (Added at the very top of app lifecycle)
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 # ------------------------------------------------------------------
 # CORS is now handled in main.py to cover all routers.
 
@@ -48,12 +59,11 @@ client = OpenAI(api_key=api_key, timeout=90.0)
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 # ------------------------------------------------------------------
-# Health
-# ------------------------------------------------------------------
-
+@app.get("/")
 @app.get("/health")
 def health() -> Dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "message": "Prompt Master API is Live"}
+
 
 # ------------------------------------------------------------------
 # FULL PROMPT ENDPOINT (only returns what you want)
