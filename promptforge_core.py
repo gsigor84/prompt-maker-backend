@@ -4,7 +4,7 @@ import json
 import uuid
 import logging
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -81,11 +81,11 @@ class DirectionsProposal(BaseModel):
 
 
 class DraftPrompt(BaseModel):
-    persona: str = Field(..., min_length=1)
-    context: str = Field(..., min_length=1)
+    persona: str = Field(default="", min_length=0)
+    context: str = Field(default="", min_length=0)
     task: str = Field(..., min_length=1)
-    output_requirements: str = Field(..., min_length=1)
-    permission_to_fail: str = Field(..., min_length=1)
+    output_requirements: str = Field(default="", min_length=0)
+    permission_to_fail: Union[str, bool] = Field(default="")
 
 
 class RefinementReport(BaseModel):
@@ -315,14 +315,20 @@ class PromptForgeOrchestrator:
         self.log.info("OK", extra={"step": "FORMAT_FINAL_OUTPUT"})
         return out
 
-    def run(self, user_task: str) -> FinalPrompt:
+    def run(self, user_task: str, interaction_callback: Optional[callable] = None, answers: Optional[dict] = None) -> FinalPrompt:
         self.current_task = user_task
         self.log.info("START", extra={"step": "RUN"})
+
+        # Enrich task with answers immediately if provided
+        if answers:
+            self.current_task += "\n\n[USER ANSWERS TO CLARIFYING QUESTIONS]:\n"
+            for q, a in answers.items():
+                self.current_task += f"Q: {q}\nA: {a}\n"
 
         state = RunState(run_id=self.run_id, step=AgentStep.COLLECT_REQUIREMENTS)
         self._save_state(state)
 
-        req = self.collect_requirements(user_task)
+        req = self.collect_requirements(self.current_task)
         state.step = AgentStep.COLLECT_REQUIREMENTS
         state.requirements = req
         self._save_state(state)
@@ -331,6 +337,24 @@ class PromptForgeOrchestrator:
         state.step = AgentStep.ANALYZE_REQUIREMENTS
         state.analysis = analysis
         self._save_state(state)
+
+        # INTERACTIVE CHECK
+        # If we have missing info, we check if we can get it from callback
+        # (If answers were already passed, they are in the task now, so analysis should be cleaner.
+        # But if analysis STILL finds missing info, we ask again.)
+        
+        if analysis.missing_info:
+            additional_info = None
+            if interaction_callback:
+                self.log.info("INTERACTIVE: Asking user for input via callback", extra={"step": "ANALYZE_REQUIREMENTS"})
+                additional_info = interaction_callback(analysis.missing_info)
+            
+            # If we got info (either from callback or future logic), update task
+            if additional_info:
+                 req.task += f"\n\n[USER PROVIDED DETAILS]:\n{additional_info}"
+                 # We could re-analyze here, but we proceed for now
+                 state.requirements = req
+                 self._save_state(state)
 
         directions = self.propose_directions(analysis)
         state.step = AgentStep.PROPOSE_DIRECTIONS

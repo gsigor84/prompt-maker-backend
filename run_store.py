@@ -14,16 +14,15 @@ class RunStore:
     - save(dict): appends one JSON object to data/runs.jsonl
     - suggest_direction_name(task): returns most recent chosen_direction_name for that task (if any)
 
-    Notes:
-    - This is great for local dev.
-    - On many hosts, filesystem may be ephemeral unless you attach a persistent disk.
+    Note:
+    - On Fly.io, local disk is ephemeral unless you add a volume.
+    - This is still fine for logging/debugging.
     """
 
     def __init__(self, path: str = "data/runs.jsonl"):
         self.path = path
         self._lock = threading.Lock()
 
-        # Create directory only if one exists in the path (avoid dirname == "")
         dir_name = os.path.dirname(self.path)
         if dir_name:
             os.makedirs(dir_name, exist_ok=True)
@@ -35,7 +34,6 @@ class RunStore:
         line = json.dumps(record, ensure_ascii=False)
 
         with self._lock:
-            # Ensure directory exists at write-time too (covers path changes)
             dir_name = os.path.dirname(self.path)
             if dir_name:
                 os.makedirs(dir_name, exist_ok=True)
@@ -49,7 +47,6 @@ class RunStore:
 
         with self._lock:
             try:
-                # Read file lines, scan backwards. Still simple.
                 with open(self.path, "r", encoding="utf-8") as f:
                     lines = f.read().splitlines()
             except Exception:

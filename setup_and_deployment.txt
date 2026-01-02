@@ -1,0 +1,76 @@
+SETUP AND DEPLOYMENT GUIDE
+==========================
+
+This document covers practical information on setting up, configuring, and deploying the Prompt Master backend.
+
+1. PREREQUISITES
+----------------
+- Python 3.9 or higher
+- An OpenAI API Key (from platform.openai.com)
+
+2. INSTALLATION (Local)
+-----------------------
+Follow these steps to get running locally:
+
+A. Application Setup
+   1. Create a virtual environment:
+      python -m venv .venv
+
+   2. Activate the virtual environment:
+      - Mac/Linux: source .venv/bin/activate
+      - Windows: .venv\Scripts\activate
+
+   3. Install dependencies:
+      pip install -r requirements.txt
+
+B. Environment Configuration
+   1. Create a `.env` file in the root directory.
+   2. Add your API key and settings:
+
+      OPENAI_API_KEY=sk-your-key-here
+      OPENAI_MODEL=gpt-4o-mini
+      
+      # Optional Settings
+      PIPELINE_MODE=prod          # 'dev' enables debug logging and reloading
+      JSON_STRICT=True            # Enforces valid JSON from LLM (retries if failed)
+      OPENAI_TIMEOUT_S=90.0       # Timeout for long prompt generations
+
+3. DEPLOYMENT
+-------------
+The project is designed to be deployed as a containerized web service.
+
+A. Docker
+   The included `Dockerfile` builds the application for production.
+   
+   Build:
+   docker build -t prompt-master .
+   
+   Run:
+   docker run -p 8080:8080 -e OPENAI_API_KEY=your-key -e PORT=8080 prompt-master
+
+B. Fly.io
+   A `fly.toml` file is present for deployment on Fly.io.
+   
+   1. Install flyctl.
+   2. Login: `fly auth login`
+   3. Deploy: `fly deploy`
+   
+   *Note*: Ensure you set your secrets on Fly:
+   fly secrets set OPENAI_API_KEY=sk-your-key-here
+
+4. TROUBLESHOOTING
+------------------
+- "RuntimeError: OPENAI_API_KEY is missing"
+  -> Check your `.env` file exists and is named correctly (not .env.txt).
+  -> Ensure simple quotes are not included in the key string unless part of the key.
+
+- "ModuleNotFoundError: No module named 'rich'"
+  -> Run `pip install -r requirements.txt` again.
+  -> Ensure your virtual environment is activated.
+
+- "Bad LLM output (invalid JSON)"
+  -> This happens occasionally if the model hallucinates. The system auto-retries, but if it persists, try switching to a smarter model (e.g., gpt-4) in `.env` if budget allows.
+
+5. LOGS AND DATA
+----------------
+- Run History: Stored in `data/runs.jsonl`. This file grows over time. In a containerized environment (Docker/Fly), this data is ephemeral unless a persistent volume is mounted.
