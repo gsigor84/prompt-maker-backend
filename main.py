@@ -15,7 +15,11 @@ from prompt_quality import PromptQualityService
 
 # ✅ NEW: Mount the Agentic Flow router
 from agentic_flow.router import router as agent_router
+from agentic_flow.thinking_partner_router import router as thinking_router
+
 fastapi_app.include_router(agent_router)
+fastapi_app.include_router(thinking_router)
+
 
 # CORS is handled in api.py at the top level of the FastAPI lifecycle.
 
@@ -25,8 +29,8 @@ console = Console()
 @click.group(invoke_without_command=True)
 @click.pass_context
 @click.option("-b", "--builder", is_flag=True, help="Run in Interactive Builder Mode")
-@click.argument("task_input", required=False)
-def cli(ctx, builder, task_input):
+@click.argument("args", nargs=-1)
+def cli(ctx, builder, args):
     """
     Prompt Master: The AI Pipeline for perfect prompts.
 
@@ -34,23 +38,34 @@ def cli(ctx, builder, task_input):
       python main.py "Your simple task"  (Fast Mode)
       python main.py -b "Complex task"   (Interactive Builder)
       python main.py serve               (Start Web Server)
+      python main.py thinking "Query"    (Reframe & Audit)
     """
-    # 1. If 'serve' was passed, it might be captured as task_input
-    if task_input == "serve":
-        ctx.invoke(serve)
-        return
-
-    # 2. If a subcommand was properly invoked (rare with greedy args), let it run
+    # 1. If a subcommand was properly invoked (rare with greedy args), let it run
     if ctx.invoked_subcommand is not None:
         return
 
-    # 3. If no task provided, show help
-    if not task_input:
+    # 2. Check if the first argument is a known subcommand
+    if args and args[0] in cli.list_commands(ctx):
+        cmd_name = args[0]
+        if cmd_name == "serve":
+            ctx.invoke(serve)
+        elif cmd_name == "thinking":
+            query = args[1] if len(args) > 1 else ""
+            ctx.invoke(thinking, query=query)
+        return
+
+
+    # 3. Defaut to pipeline if no command found and args exist
+    if not args:
         click.echo(ctx.get_help())
         return
 
-    # 4. Run pipeline
+    task_input = " ".join(args)
     run_pipeline(task_input, interactive=builder)
+
+
+
+
 
 
 
@@ -68,6 +83,37 @@ def serve():
         reload=use_reload,
         log_level="info",
     )
+
+@cli.command()
+@click.argument("query")
+def thinking(query: str):
+    """
+    Reframe and Audit a query (Thinking Partner Mode).
+    """
+    from thinking_partner import ThinkingPartnerService
+    from rich.panel import Panel
+    
+    console.print(Panel(f"[bold cyan]🔍 Analyzing Query:[/bold cyan]\n{query}", title="Thinking Partner"))
+    
+    with console.status("[bold yellow]Thinking...") as status:
+        service = ThinkingPartnerService()
+        result = service.analyze(query)
+        
+    console.print("\n[bold red]DIAGNOSIS:[/bold red]")
+    console.print(f"[white]{result.diagnosis.rationale}[/white]")
+    for issue in result.diagnosis.issues:
+        console.print(f" • [dim]{issue}[/dim]")
+        
+    console.print("\n[bold green]REFRAME SUGGESTIONS:[/bold green]")
+    for i, s in enumerate(result.suggestions, 1):
+        console.print(f"\n[bold gold1]{i}. {s.type}[/bold gold1]")
+        console.print(f"[italic]{s.educational_note}[/italic]")
+        console.print(f"[white]'{s.content}'[/white]")
+        
+    console.print("\n[bold blue]TIPS:[/bold blue]")
+    for tip in result.tips:
+        console.print(f" • {tip}")
+
 
 def run_pipeline(task: str, interactive: bool):
     """Runs the prompt generation pipeline."""
