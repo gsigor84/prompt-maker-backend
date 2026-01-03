@@ -268,20 +268,19 @@ class PromptForgeOrchestrator:
         self.log.info("START", extra={"step": "GENERATE_DRAFT"})
 
         system_prompt = (
-            "You are a prompt-design agent. You NEVER execute the user's task. "
-            "You only produce a prompt template.\n\n"
-            "You must follow the chosen direction:\n"
-            f"- Direction name: {chosen.name}\n"
+            "You are a MASTER PROMPT ARCHITECT specializing in high-density, production-grade AI prompts.\n"
+            "Your goal is to transform the user's task into a comprehensive, robust, and extremely detailed system prompt.\n\n"
+            "Follow the chosen direction:\n"
+            f"- Strategy: {chosen.name}\n"
             f"- Rationale: {chosen.rationale}\n\n"
-            "Rules:\n"
-            "- Do NOT invent user requirements.\n"
-            "- Always include the foundations: persona, context, task, output_requirements, permission_to_fail.\n"
-            "- If direction implies examples (few-shot), include them INSIDE output_requirements or context, "
-            "but still return the same 5 JSON keys.\n\n"
-            "Return ONLY a JSON object with these keys:\n"
+            "STRICT RULES FOR HIGH DENSITY:\n"
+            "1. Deep Specification: Do NOT just summarize. Expand every user detail into specific instructions.\n"
+            "2. Professional Tone: Use sophisticated prompt engineering language (e.g., 'chain-of-thought', 'parameter-tuning', 'zero-shot optimization').\n"
+            "3. Exhaustive Context: Elaborate on the persona and context sections using every available anchor point from the user's answers.\n"
+            "4. Operational Excellence: Include precise output formats, success criteria, and error-handling instructions.\n"
+            "5. NO FILLER: Every word must add functional value to the final prompt.\n\n"
+            "Return ONLY a JSON object with these keys (each mapping to a rich, long STRING):\n"
             "persona, context, task, output_requirements, permission_to_fail\n"
-            "IMPORTANT: Every key must map to a STRING (except permission_to_fail which can be bool).\n"
-            "Do NOT return objects or lists for persona, context, or output_requirements.\n"
             "No extra text."
         )
 
@@ -299,20 +298,17 @@ class PromptForgeOrchestrator:
         self.log.info("START", extra={"step": "REFINE_OUTPUT"})
 
         system_prompt = (
-            "You are a prompt-quality refiner. You NEVER execute the user's task. "
-            "You only improve the prompt.\n\n"
-            "You must preserve and strengthen the chosen direction:\n"
-            f"- Direction name: {chosen.name}\n"
-            f"- Rationale: {chosen.rationale}\n\n"
-            "Rules:\n"
-            "- Do NOT invent user requirements.\n"
-            "- Do NOT change the task intent.\n"
-            "- Keep the foundations: persona, context, task, output_requirements, permission_to_fail.\n\n"
+            "You are a SENIOR PROMPT OPTIMIZER. Your job is to take a draft prompt and make it 2x more detailed and robust.\n\n"
+            "REFINEMENT DIRECTIVES:\n"
+            "- Expand every section with more depth and precision.\n"
+            "- Strengthen the persona with domain-specific expertise.\n"
+            "- Add a 'Success Criteria' and 'Negative Constraints' subsection inside output_requirements if missing.\n"
+            "- Ensure the prompt is 'leak-proof' and handles edge cases elegantly.\n"
+            "- Maintain the chosen direction: {chosen.name}.\n\n"
             "Return ONLY JSON with keys:\n"
             "changes (array of strings), refined (object with keys: "
             "persona, context, task, output_requirements, permission_to_fail).\n"
-            "IMPORTANT: Every key in 'refined' must map to a STRING (except permission_to_fail).\n"
-            "No extra text."
+            "Every field in 'refined' MUST be a high-density string."
         )
 
         user_input = json.dumps(draft.model_dump(), ensure_ascii=False)
