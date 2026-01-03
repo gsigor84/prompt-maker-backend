@@ -113,8 +113,9 @@ class RunState(BaseModel):
 # -------------------------
 
 class LLMClient:
-    def __init__(self, api_key: str, model: str = "gpt-5"):
+    def __init__(self, api_key: str, model: str = "gpt-4o-mini"):
         self.client = OpenAI(api_key=api_key)
+
         self.model = model
 
     def call(self, system_prompt: str, user_input: str) -> str:
@@ -403,9 +404,10 @@ class PromptForgeOrchestrator:
 def build_orchestrator() -> PromptForgeOrchestrator:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is missing. Set it in your .env or environment.")
+        api_key = "MISSING" # Allow building for inspection/logs, but call() will fail if used.
 
-    model = os.getenv("OPENAI_MODEL", "gpt-5")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
 
     config = PipelineConfig.from_env()
 

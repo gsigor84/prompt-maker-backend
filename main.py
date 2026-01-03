@@ -17,15 +17,8 @@ from prompt_quality import PromptQualityService
 from agentic_flow.router import router as agent_router
 fastapi_app.include_router(agent_router)
 
-# ✅ TOP-LEVEL CORS (Covers all routers + prevents 502/CORS confusion)
-from fastapi.middleware.cors import CORSMiddleware
-fastapi_app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS is handled in api.py at the top level of the FastAPI lifecycle.
+
 
 console = Console()
 

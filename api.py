@@ -51,12 +51,15 @@ class PromptRequest(BaseModel):
 
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
-    logger.error("❌ OPENAI_API_KEY IS MISSING! The app will start but generation will fail.")
+    logger.warning("⚠️ OPENAI_API_KEY is missing. Prompt generation will fail at runtime, but server will remain up.")
 
-
-client = OpenAI(api_key=api_key, timeout=90.0)
+# Initialize client only if key is present to avoid OpenAI library initialization errors
+client = None
+if api_key:
+    client = OpenAI(api_key=api_key, timeout=90.0)
 
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
 
 # ------------------------------------------------------------------
 @app.get("/")
@@ -72,7 +75,11 @@ def health() -> Dict[str, str]:
 @app.post("/api/prompt/full")
 def generate_full_prompt(req: PromptRequest):
     try:
+        if not client:
+            raise HTTPException(status_code=500, detail="OpenAI Client not initialized (missing API Key)")
+
         system_prompt = (
+
             "You are an expert prompt architect.\n"
             "Your job is to produce a COMPLETE, HIGH-QUALITY PROMPT for another AI.\n\n"
             "Rules:\n"
