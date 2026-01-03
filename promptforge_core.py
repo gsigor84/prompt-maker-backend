@@ -4,11 +4,11 @@ import json
 import uuid
 import logging
 from enum import Enum
-from typing import List, Optional, Union
-
+from typing import List, Optional, Union, Any
 from dotenv import load_dotenv
 from openai import OpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
 
 from config import PipelineConfig, PipelineMode, SelectionPolicy
 from run_store import RunStore
@@ -86,6 +86,24 @@ class DraftPrompt(BaseModel):
     task: str = Field(..., min_length=1)
     output_requirements: str = Field(default="", min_length=0)
     permission_to_fail: Union[str, bool] = Field(default="")
+
+    @model_validator(mode="before")
+    @classmethod
+    def ensure_strings(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+            
+        def stringify(val: Any) -> str:
+            if isinstance(val, (dict, list)):
+                return json.dumps(val, ensure_ascii=False)
+            return str(val)
+
+        for field in ["persona", "context", "output_requirements", "task"]:
+            if field in data and not isinstance(data[field], str):
+                data[field] = stringify(data[field])
+        
+        return data
+
 
 
 class RefinementReport(BaseModel):
@@ -262,6 +280,8 @@ class PromptForgeOrchestrator:
             "but still return the same 5 JSON keys.\n\n"
             "Return ONLY a JSON object with these keys:\n"
             "persona, context, task, output_requirements, permission_to_fail\n"
+            "IMPORTANT: Every key must map to a STRING (except permission_to_fail which can be bool).\n"
+            "Do NOT return objects or lists for persona, context, or output_requirements.\n"
             "No extra text."
         )
 
@@ -291,6 +311,7 @@ class PromptForgeOrchestrator:
             "Return ONLY JSON with keys:\n"
             "changes (array of strings), refined (object with keys: "
             "persona, context, task, output_requirements, permission_to_fail).\n"
+            "IMPORTANT: Every key in 'refined' must map to a STRING (except permission_to_fail).\n"
             "No extra text."
         )
 
