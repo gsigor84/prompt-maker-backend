@@ -13,12 +13,28 @@ from api import app as fastapi_app
 from promptforge_core import build_orchestrator
 from prompt_quality import PromptQualityService
 
-# ✅ NEW: Mount the Agentic Flow router
+from fastapi import APIRouter
 from agentic_flow.router import router as agent_router
 from agentic_flow.thinking_partner_router import router as thinking_router
 
 fastapi_app.include_router(agent_router)
+
 fastapi_app.include_router(thinking_router)
+
+# ✅ LEGACY COMPATIBILITY: 
+# The frontend sometimes prepends /api/prompt/full to the new routes.
+# We mount them under a compat router to handle this without 404s.
+legacy_router = APIRouter(prefix="/api/prompt/full")
+legacy_router.include_router(agent_router)
+legacy_router.include_router(thinking_router)
+
+@legacy_router.get("/health")
+def legacy_health():
+    return {"status": "ok", "message": "Legacy Compatibility Layer is Active"}
+
+fastapi_app.include_router(legacy_router)
+
+
 
 
 # CORS is handled in api.py at the top level of the FastAPI lifecycle.
