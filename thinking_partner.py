@@ -16,8 +16,11 @@ logger = logging.getLogger(__name__)
 # -------------------------
 
 class DiagnosisReport(BaseModel):
-    issues: List[str]
-    rationale: str
+    intent_type: str = "unknown"  # shopping, research, creation, harmful
+    confidence: dict = {}  # {"shopping": 95, "research": 2, "harmful": 3}
+    issues: List[str] = []
+    rationale: str = ""
+    friction_words: List[str] = []  # words triggering safety concerns
 
 class ReframeSuggestion(BaseModel):
     type: str # e.g., "Academic", "Perspective Shift", "Learning"
@@ -68,33 +71,56 @@ class ThinkingPartnerService:
         """
         Full 2-step pipeline: Diagnosis -> Reframing.
         """
-        # STEP A: Diagnosis
+        # STEP A: Diagnosis with Intent Classification
         diagnosis_system = (
-            "You are a 'Thinking Partner' diagnostic agent.\n"
-            "Analyze the user's input for vague intent, loaded language, bias, or potential ethical/policy violations.\n"
-            "Explain CLEARLY why these are issues for an AI or for critical thinking.\n"
-            "CRITICAL: Be objective and analytical. Avoid being preachy. Focus on the structural reasons "
-            "(e.g., 'facilitating crime' vs 'studying crime') rather than just moralizing.\n"
-            "Return ONLY JSON with keys: issues (array of strings), rationale (string)."
+            "You are a 'Thinking Partner' query optimizer.\\n\\n"
+            "STEP 1 - CLASSIFY INTENT with confidence scores (must total 100):\\n"
+            "- shopping: User wants to BUY or FIND something (products, services, deals)\\n"
+            "- research: User wants to LEARN or UNDERSTAND something\\n"
+            "- creation: User wants to MAKE or BUILD something\\n"
+            "- harmful: Genuinely dangerous request (weapons, violence, illegal acts with victims)\\n\\n"
+            "STEP 2 - IDENTIFY FRICTION WORDS:\\n"
+            "What specific words might trigger safety filters? (e.g., 'fake', 'pirate', 'hack')\\n\\n"
+            "STEP 3 - ASSESS ISSUES:\\n"
+            "Only flag issues if the query is genuinely problematic, not just 'gray area' shopping.\\n"
+            "Be practical, not preachy. A user wanting cheap replica jerseys is NOT the same as someone planning fraud.\\n\\n"
+            "Return ONLY JSON with keys:\\n"
+            "intent_type (string: shopping/research/creation/harmful),\\n"
+            "confidence (object: {shopping: X, research: Y, creation: Z, harmful: W} where X+Y+Z+W=100),\\n"
+            "friction_words (array of strings),\\n"
+            "issues (array of strings - keep empty if just gray-area shopping),\\n"
+            "rationale (string - brief explanation)."
         )
         
         diag_data = self._call_json(diagnosis_system, user_query)
         diagnosis = DiagnosisReport(**diag_data)
         
-        # STEP B: Reframing
+        # STEP B: Intent-Preserving Reframing
         reframing_system = (
-            "You are an EXPERT critical thinking orchestrator.\n"
-            "Based on the diagnosis provided, provide 3 distinct reframes of the original query.\n\n"
-            "CRITICAL GOAL: TOPIC PRESERVATION.\n"
-            "Do NOT switch the topic to a safe/legal alternative. Instead, reframe it into an ACADEMIC or SOCIOLOGICAL study of the ORIGINAL TOPIC.\n\n"
-            "CRITICAL: PRIORITIZE RECENCY. Focus the reframes on the MOST RECENT documented trends, latest available seizure data (e.g., last 12-24 months), and contemporary geopolitical context. Avoid defaulting to 'historical' analysis.\n\n"
-            "Available Frames:\n"
-            "1. Academic/Neutral Frame: Focus on the phenomenon as a CURRENT study.\n"
-            "2. Perspective Shift: Look at it from the lens of a researcher, journalist, or fictional world-builder.\n"
-            "3. Learning/Prevention Frame: Turns 'how to do' into 'how it works structurally' or 'how to detect'.\n\n"
-            "Return ONLY JSON with keys:\n"
-            "suggestions (array of objects with: type, content, educational_note),\n"
-            "tips (array of strings for general improvement)."
+            "You are an EXPERT query optimizer that helps users get better results.\\n\\n"
+            "CRITICAL RULE: MAINTAIN THE USER'S DOMAIN\\n"
+            "- If intent is SHOPPING → All reframes must be SHOPPING queries (finding products, deals, alternatives)\\n"
+            "- If intent is RESEARCH → Reframes can be academic/analytical\\n"
+            "- If intent is CREATION → Reframes must help them create/build\\n"
+            "- If intent is HARMFUL (confidence > 70%) → Use strict safety handling\\n\\n"
+            "VOCABULARY SANITIZATION (for gray-area queries):\\n"
+            "Replace problematic words with legitimate alternatives that achieve the same goal:\\n"
+            "- 'fake' → 'replica', 'budget', 'affordable', 'third-party', 'unbranded'\\n"
+            "- 'knockoff' → 'alternative', 'inspired by', 'retro style'\\n"
+            "- 'pirate' → 'free alternatives', 'open-source', 'student discount', 'trial version'\\n"
+            "- 'hack' → 'automate', 'optimize', 'customize', 'shortcut'\\n"
+            "- 'steal' → 'find deals', 'get for free legally', 'discount codes'\\n\\n"
+            "EXAMPLES OF GOOD REFRAMES:\\n"
+            "❌ 'buy fake jerseys' → 'essay on counterfeiting ethics' (WRONG - pivots away from shopping)\\n"
+            "✅ 'buy fake jerseys' → 'affordable replica football jerseys from budget retailers' (CORRECT)\\n"
+            "✅ 'buy fake jerseys' → 'best sites for unbranded football kits under $30' (CORRECT)\\n"
+            "✅ 'buy fake jerseys' → 'DHgate vs AliExpress for replica sports apparel reviews' (CORRECT)\\n\\n"
+            "❌ 'pirate Photoshop' → 'history of software piracy laws' (WRONG)\\n"
+            "✅ 'pirate Photoshop' → 'best free open-source Photoshop alternatives like GIMP' (CORRECT)\\n"
+            "✅ 'pirate Photoshop' → 'Adobe Creative Cloud student discounts and free trials' (CORRECT)\\n\\n"
+            "Return ONLY JSON with keys:\\n"
+            "suggestions (array of 3 objects with: type, content, educational_note),\\n"
+            "tips (array of strings for search optimization)."
         )
         
         reframe_input = f"ORIGINAL QUERY: {user_query}\n\nDIAGNOSIS: {json.dumps(diag_data)}"
